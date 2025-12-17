@@ -1,11 +1,14 @@
 from setuptools import setup
-import imp
+#import imp
+from importlib.machinery import SourceFileLoader
 
 
 with open("README.md") as file:
     long_description = file.read()
 
-version = imp.load_source("spatialscaper.version", "spatialscaper/version.py")
+#version = imp.load_source("spatialscaper.version", "spatialscaper/version.py")
+version = SourceFileLoader('spatialscaper.version', 'spatialscaper/version.py').load_module()
+
 
 setup(
     name="spatialscaper",

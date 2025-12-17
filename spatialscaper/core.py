@@ -25,6 +25,8 @@ from .utils import (
     get_labels,
     save_output,
     sort_matrix_by_columns,
+    traj_2_ir_idx,
+    translate_origin,
 )
 from .sofa_utils import load_rir_pos, load_pos
 from .spatialize import spatialize
@@ -151,6 +153,8 @@ class Scaper:
         self.DCASE_format = DCASE_format
         if self.DCASE_format:
             self.label_rate = __DCASE_LABEL_RATE__
+        else:
+            self.label_rate = 1.0
         self.max_event_overlap = max_event_overlap
         self.max_event_dur = max_event_dur
         self.ref_db = ref_db
@@ -324,23 +328,27 @@ class Scaper:
             # round down to one decimal value
             event_time_ = (self.label_rate * event_time_ // 1) / self.label_rate
 
-        if event_position[0] == "choose":
-            moving = bool(random.getrandbits(1))
+        if event_position[0] == "const":
+            event_position_ = event_position[1]
         else:
-            moving = True if event_position[0] == "moving" else False
-        if moving:  # currently the trajectory shape is randomly selected
-            shape = "circular" if bool(random.getrandbits(1)) else "linear"
-            if event_position[1][0] == "uniform" and moving:
-                event_position_ = self.define_trajectory(
-                    event_position[1],
-                    int(event_duration_ / (1 / self.label_rate)),
-                    shape,
-                    event_duration_,
-                    self.speed_limit,
-                )
-        else:
-            xyz_min, xyz_max = self._get_room_min_max()
-            event_position_ = [self._gen_xyz(xyz_min, xyz_max)]
+            if event_position[0] == "choose":
+                moving = bool(random.getrandbits(1))
+            else:
+                moving = True if event_position[0] == "moving" else False
+            if moving:  # currently the trajectory shape is randomly selected
+                shape = "circular" if bool(random.getrandbits(1)) else "linear"
+                if event_position[1][0] == "uniform" and moving:
+                    event_position_ = self.define_trajectory(
+                        event_position[1],
+                        int(event_duration_ / (1 / self.label_rate)),
+                        shape,
+                        event_duration_,
+                        self.speed_limit,
+                    )
+            else:
+                xyz_min, xyz_max = self._get_room_min_max()
+                event_position_ = [self._gen_xyz(xyz_min, xyz_max)]
+
 
         if snr[0] == "uniform" and len(snr) == 3:
             snr_ = random.uniform(*snr[1:])
@@ -583,6 +591,64 @@ class Scaper:
             ir_sr = self.sr
         return all_irs, ir_sr, all_ir_xyzs
 
+    def get_soundspaces_room_irs_wav_xyz(self, wav=True, pos=True, max_ir_len=4096):
+        """
+        Retrieves impulse responses and their positions for the room.
+
+        Args:
+            wav (bool): Whether to include the waveforms of the impulse responses.
+            pos (bool): Whether to include the positions of the impulse responses.
+
+        Returns:
+            tuple: A tuple containing the impulse responses, their sampling rate, and their XYZ positions.
+        """
+
+
+        ### HACK FIX: Workaround for soundspaces. Fixing listener position to center of room. And loading source RIRs for that listener index.
+
+        room_metadata_path = os.path.join(
+            self.rir_dir,
+            self.room,
+            "points.txt"
+        )
+
+        all_irs, ir_sr, all_ir_xyzs = [], [], [] 
+
+        soundspaces_rir_listener_positions = np.array([[a[1],a[2],a[3]] for a in np.loadtxt(room_metadata_path, delimiter='\t')])
+
+        # Calculate the center of the listener positions to use as the Actual Listener Position
+        ssrir_origin_x = (np.min(soundspaces_rir_listener_positions.T[0])+np.max(soundspaces_rir_listener_positions.T[0]))/2
+        ssrir_origin_y = (np.min(soundspaces_rir_listener_positions.T[1])+np.max(soundspaces_rir_listener_positions.T[1]))/2
+        ssrir_origin_z = (np.min(soundspaces_rir_listener_positions.T[2])+np.max(soundspaces_rir_listener_positions.T[2]))/2
+        ssrir_origin = [ssrir_origin_x, ssrir_origin_y, ssrir_origin_z]
+
+        # Find the closest listener position in the SoundSpaces RIR dataset to the provided listener_position
+        ss_selected_listener_index = traj_2_ir_idx(soundspaces_rir_listener_positions, [ssrir_origin])[0]
+        # ss_selected_listener_xyz = soundspaces_rir_listener_positions[ss_selected_listener_index]
+        # print('Listener Origin: ', ssrir_origin, ' | Selected Listener Index: ', ss_selected_listener_index, ' | Selected Listener Position: ', ss_selected_listener_xyz)
+
+        # Fetch all source IR positions for this listener position (which is the center of the room here)
+        for source_id, source_position in enumerate(soundspaces_rir_listener_positions):
+            ir = librosa.load(os.path.join(
+                self.rir_dir,
+                self.room,
+                "irs",
+                f"{source_id}_{ss_selected_listener_index}.wav"
+                # f"{ss_selected_listener_index}_{source_id}.wav"
+            ), mono=False, sr=16000)[0][:4, :]  # Load first 4 channels only
+            if ir.shape[1] != max_ir_len:
+                pad_width = max_ir_len - ir.shape[1]
+                ir = np.pad(ir, ((0, 0), (0, pad_width)), mode='constant')
+
+            all_irs.append(ir)
+            all_ir_xyzs.append(source_position)
+        all_irs = np.array(all_irs)
+        all_ir_xyzs = np.array(all_ir_xyzs) 
+        ir_sr = self.sr
+        return all_irs, ir_sr, all_ir_xyzs
+
+        
+
     def generate_noise(self, event):
         """
         Generates noise to be used as background ambient.
@@ -598,6 +664,23 @@ class Scaper:
         )
         return noise_signal
 
+
+    def asSpherical(self, xyz):
+        #takes list xyz (single coord)
+        # x       = xyz[0]
+        # y       = xyz[1]
+        # z       = xyz[2]
+        # r       =  np.sqrt(x*x + y*y + z*z)
+        # theta   =  np.acos(z/r)*180/ np.pi #to degrees
+        # phi     =  np.atan2(y,x)*180/ np.pi
+        x       = xyz[0]
+        y       = xyz[1]
+        z       = xyz[2]
+        r       =  np.sqrt(x*x + y*y + z*z)
+        theta   =  np.arcsin(z/r)*180/ np.pi #to degrees
+        phi     =  np.arctan2(y,x)*180/ np.pi
+        return [r,theta,phi]
+        
     def synthesize_events_and_labels(self, all_irs, all_ir_xyzs, out_audio):
         """
         Synthesizes audio events based on foreground events and their spatial trajectories,
@@ -637,13 +720,20 @@ class Scaper:
         events = tqdm.tqdm(self.fg_events, desc="🧪 Spatializing events 🔊...")
         for ievent, event in enumerate(events):
             # fetch trajectory from irs
+            print('In:', event.event_position)
             ir_idx = traj_2_ir_idx(all_ir_xyzs, event.event_position)
+            print('Final Source Selected Indices: ', ir_idx)
             irs = all_irs[ir_idx]
             ir_xyzs = all_ir_xyzs[ir_idx]
             # remove repeated positions
             ir_idx = find_indices_of_change(ir_xyzs)
             irs = irs[ir_idx]
             ir_xyzs = ir_xyzs[ir_idx]
+            print('Final Source Selected Indices: ', ir_xyzs, self.asSpherical(ir_xyzs[0]))
+
+            # print("---------------------------------------------")
+            # print("FINAL SOURCE POSITIONS: ", ir_xyzs)
+            # print("---------------------------------------------")
 
             # load and normalize audio signal to have peak of 1
             x, _ = librosa.load(event.source_file, sr=self.sr)
@@ -651,13 +741,15 @@ class Scaper:
             x = x / np.max(np.abs(x))
 
             # normalize irs to have unit energy
-            norm_irs = IR_normalizer(irs)
+            #norm_irs = IR_normalizer(irs)
+            norm_irs = irs 
 
             # SPATIALIZE
             # need at least a start and end point for IR interpolation
             if len(irs) == 1:            
                 ir_xyzs = np.concatenate([ir_xyzs, ir_xyzs])
             ir_times = np.linspace(0, event.event_duration, len(ir_xyzs))
+            # print('IR Times: ', ir_times)
             norm_irs = np.transpose(
                 norm_irs, (1, 0, 2)
             )  # (n_irs, n_ch, n_ir_samples) -> (n_ch, n_irs, n_ir_samples)
@@ -678,6 +770,7 @@ class Scaper:
                 ir_times,
                 time_grid_resolution=round(1 / self.label_rate, 1),
             )
+            # print('Time Grid: ', time_grid)
             labels = get_labels(
                 ir_times,
                 time_grid,
@@ -689,6 +782,7 @@ class Scaper:
             xS = xS[
                 : int(time_grid[-1] * self.sr)
             ]  # trim audio signal to exactly match labels
+            # print('Sampling Rate: ', self.sr, labels)
             all_labels.append(labels)
 
         labels = sort_matrix_by_columns(np.vstack(all_labels))
@@ -717,7 +811,7 @@ class Scaper:
             out_audio += scale * ambient
         return out_audio
 
-    def generate(self, audiopath, labelpath):
+    def generate(self, audiopath, labelpath, is_soundspaces=False, max_ir_len=4096):
         """
         Generates the final soundscape audio and corresponding labels, then saves them to specified paths.
 
@@ -742,14 +836,20 @@ class Scaper:
         and that the output audio and labels are accurately saved for further use or analysis.
         """
 
-        all_irs, ir_sr, all_ir_xyzs = self.get_room_irs_wav_xyz()
+        all_irs, ir_sr, all_ir_xyzs = None, None, None
+
+        if is_soundspaces: # SoundSpaces --- Hackfix. Argh!!
+            all_irs, ir_sr, all_ir_xyzs = self.get_soundspaces_room_irs_wav_xyz(max_ir_len=max_ir_len)
+        else:   
+            all_irs, ir_sr, all_ir_xyzs = self.get_room_irs_wav_xyz(listener_position=listener_position)
+        
         self.nchans = all_irs.shape[1]  # a bit ugly but works for now
 
         # initialize output audio array
         out_audio = np.zeros((int(self.duration * self.sr), self.nchans))
 
         # add background ambience
-        out_audio = self.get_background_noise(out_audio)
+        #out_audio = self.get_background_noise(out_audio)
 
         # sort foreground events by onset time
         self.fg_events = sorted(self.fg_events, key=lambda x: x.event_time)

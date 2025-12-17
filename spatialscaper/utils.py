@@ -476,3 +476,7 @@ def count_leading_zeros_in_period(frequency_hz):
         for i, digit in enumerate(fractional_part)
         if digit == "0" and "1" not in fractional_part[: i + 1]
     )
+
+
+def translate_origin(original_points, new_origin):
+    return original_points + new_origin
