@@ -21,12 +21,6 @@ def asCartesian(rthetaphi):
 
 def asSpherical(xyz):
     #takes list xyz (single coord)
-    # x       = xyz[0]
-    # y       = xyz[1]
-    # z       = xyz[2]
-    # r       =  np.sqrt(x*x + y*y + z*z)
-    # theta   =  np.acos(z/r)*180/ np.pi #to degrees
-    # phi     =  np.atan2(y,x)*180/ np.pi
     x       = xyz[0]
     y       = xyz[1]
     z       = xyz[2]
